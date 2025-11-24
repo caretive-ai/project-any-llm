@@ -50,6 +50,8 @@
 - 자기 정보: `/v1/auth/me` → JWT/API 키 허용, 마스터 키는 거부.
 - 관리자/운영: `keys`, `users`, `budgets` 관리 등 나머지 기존 라우터 → 마스터 키만 허용(필요 시 별도 관리자 JWT 추가 가능).
 - 프로필/사용량: `/v1/profile` → JWT/API 키/마스터 키 모두 허용. 마스터 키는 `user` 쿼리 파라미터로 대상 지정 필수.
+  - 기간 집계: `/v1/profile/usage`(group_by=day/week/total, from/to 지정 가능, 요청/토큰/비용 합계)
+  - 키 메타: `/v1/profile/keys`(평문 키 미노출, 대상 사용자 키 목록)
 
 # 테이블/모델 요약
 - `api_keys`: `id`, `key_hash`, `key_name`, `user_id`, `expires_at`, `is_active`, `metadata`, `created_at`, `last_used_at`.

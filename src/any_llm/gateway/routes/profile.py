@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -74,9 +74,67 @@ class ProfileResponse(BaseModel):
     recent_usage: list[UsageLogItem]
 
 
+class UsageBucket(BaseModel):
+    """그룹별 집계."""
+
+    period: str
+    requests: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cost: float
+
+
+class UsageBucketsResponse(BaseModel):
+    """기간별 집계 응답."""
+
+    group_by: str
+    start: str
+    end: str
+    buckets: list[UsageBucket]
+    total: UsageBucket
+
+
+class KeySummary(BaseModel):
+    """API 키 메타 요약(평문 키 미노출)."""
+
+    id: str
+    key_name: str | None
+    user_id: str | None
+    created_at: str
+    last_used_at: str | None
+    expires_at: str | None
+    is_active: bool
+    metadata: dict
+
+
 def _now_naive() -> datetime:
     """UTC now without tzinfo (DB 저장 방식과 동일)."""
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _ensure_naive(dt: datetime) -> datetime:
+    """Ensure datetime is naive UTC."""
+    if dt.tzinfo:
+        return dt.astimezone(UTC).replace(tzinfo=None)
+    return dt
+
+
+def _resolve_target_user(auth_result: tuple[APIKey | None, bool, str | None], user_param: str | None) -> str:
+    """Resolve target user_id from auth and optional query."""
+    api_key, is_master, resolved_user_id = auth_result
+    if is_master:
+        if not user_param:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="When using master key, 'user' query parameter is required",
+            )
+        return user_param
+
+    target_user_id = resolved_user_id or (api_key.user_id if api_key else None)
+    if not target_user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not resolved")
+    return target_user_id
 
 
 def _aggregate_usage(db: Session, user_id: str, since: datetime) -> UsageWindow:
@@ -137,22 +195,7 @@ async def get_profile(
     recent_limit: Annotated[int, Query(default=10, ge=0, le=100, description="최근 사용 로그 개수")],
 ) -> ProfileResponse:
     """프로필 + 예산 + 사용량 집계 반환."""
-    api_key, is_master, resolved_user_id = auth_result
-
-    # 마스터 키일 때는 user 파라미터 필수
-    target_user_id: str
-    if is_master:
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="When using master key, 'user' query parameter is required",
-            )
-        target_user_id = user
-    else:
-        target_user_id = resolved_user_id or (api_key.user_id if api_key else None)  # type: ignore[attr-defined]
-        if not target_user_id:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not resolved")
-
+    target_user_id = _resolve_target_user(auth_result, user)
     user_obj = db.query(User).filter(User.user_id == target_user_id).first()
     if not user_obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"User '{target_user_id}' not found")
@@ -202,3 +245,133 @@ async def get_profile(
         usage=usage_windows,
         recent_usage=recent_logs,
     )
+
+
+@router.get("/usage")
+async def get_profile_usage(
+    auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[str | None, Query(default=None, description="마스터 키 사용 시 조회할 user_id")],
+    start: Annotated[datetime | None, Query(default=None, description="집계 시작 시각(ISO). 기본: now-30d")],
+    end: Annotated[datetime | None, Query(default=None, description="집계 종료 시각(ISO). 기본: now")],
+    group_by: Annotated[Literal["day", "week", "total"], Query(default="day", description="집계 단위")] = "day",
+) -> UsageBucketsResponse:
+    """사용량 집계(기간별)."""
+    target_user_id = _resolve_target_user(auth_result, user)
+
+    now = _now_naive()
+    start_dt = _ensure_naive(start) if start else now - timedelta(days=30)
+    end_dt = _ensure_naive(end) if end else now
+    if start_dt > end_dt:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="start must be before end")
+
+    total = _aggregate_range(db, target_user_id, start_dt, end_dt)
+
+    if group_by == "total":
+        buckets = [
+            UsageBucket(
+                period="total",
+                requests=total.requests,
+                prompt_tokens=total.prompt_tokens,
+                completion_tokens=total.completion_tokens,
+                total_tokens=total.total_tokens,
+                cost=total.cost,
+            )
+        ]
+    else:
+        truncate_unit = "day" if group_by == "day" else "week"
+        rows = (
+            db.query(
+                func.date_trunc(truncate_unit, UsageLog.timestamp).label("period"),
+                func.count(UsageLog.id),
+                func.coalesce(func.sum(UsageLog.prompt_tokens), 0),
+                func.coalesce(func.sum(UsageLog.completion_tokens), 0),
+                func.coalesce(func.sum(UsageLog.total_tokens), 0),
+                func.coalesce(func.sum(UsageLog.cost), 0.0),
+            )
+            .filter(UsageLog.user_id == target_user_id, UsageLog.timestamp >= start_dt, UsageLog.timestamp <= end_dt)
+            .group_by("period")
+            .order_by("period")
+            .all()
+        )
+
+        buckets = [
+            UsageBucket(
+                period=row[0].isoformat(),
+                requests=int(row[1]),
+                prompt_tokens=int(row[2] or 0),
+                completion_tokens=int(row[3] or 0),
+                total_tokens=int(row[4] or 0),
+                cost=float(row[5] or 0.0),
+            )
+            for row in rows
+        ]
+
+    return UsageBucketsResponse(
+        group_by=group_by,
+        start=start_dt.isoformat(),
+        end=end_dt.isoformat(),
+        buckets=buckets,
+        total=UsageBucket(
+            period="total",
+            requests=total.requests,
+            prompt_tokens=total.prompt_tokens,
+            completion_tokens=total.completion_tokens,
+            total_tokens=total.total_tokens,
+            cost=total.cost,
+        ),
+    )
+
+
+def _aggregate_range(db: Session, user_id: str, start: datetime, end: datetime) -> UsageWindow:
+    """임의 기간 합계."""
+    requests_count, prompt_sum, completion_sum, total_sum, cost_sum = (
+        db.query(
+            func.count(UsageLog.id),
+            func.coalesce(func.sum(UsageLog.prompt_tokens), 0),
+            func.coalesce(func.sum(UsageLog.completion_tokens), 0),
+            func.coalesce(func.sum(UsageLog.total_tokens), 0),
+            func.coalesce(func.sum(UsageLog.cost), 0.0),
+        )
+        .filter(UsageLog.user_id == user_id, UsageLog.timestamp >= start, UsageLog.timestamp <= end)
+        .one()
+    )
+
+    return UsageWindow(
+        requests=int(requests_count),
+        prompt_tokens=int(prompt_sum or 0),
+        completion_tokens=int(completion_sum or 0),
+        total_tokens=int(total_sum or 0),
+        cost=float(cost_sum or 0.0),
+    )
+
+
+@router.get("/keys")
+async def list_profile_keys(
+    auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[str | None, Query(default=None, description="마스터 키 사용 시 조회할 user_id")],
+) -> list[KeySummary]:
+    """사용자의 API 키 메타 조회(평문 키 미노출)."""
+    target_user_id = _resolve_target_user(auth_result, user)
+
+    keys = (
+        db.query(APIKey)
+        .filter(APIKey.user_id == target_user_id)
+        .order_by(APIKey.created_at.asc())
+        .all()
+    )
+
+    return [
+        KeySummary(
+            id=str(key.id),
+            key_name=str(key.key_name) if key.key_name else None,
+            user_id=str(key.user_id) if key.user_id else None,
+            created_at=key.created_at.isoformat() if key.created_at else None,
+            last_used_at=key.last_used_at.isoformat() if key.last_used_at else None,
+            expires_at=key.expires_at.isoformat() if key.expires_at else None,
+            is_active=bool(key.is_active),
+            metadata=dict(key.metadata_) if key.metadata_ else {},
+        )
+        for key in keys
+    ]
