@@ -25,7 +25,7 @@ def upgrade() -> None:
         sa.Column("id", sa.String(), nullable=False),
         sa.Column("user_id", sa.String(), nullable=False),
         sa.Column("provider", sa.String(), nullable=False),
-        sa.Column("provider_user_id", sa.String(), nullable=False),
+        sa.Column("role", sa.String(), nullable=False),
         sa.Column("email", sa.String(), nullable=True),
         sa.Column("name", sa.String(), nullable=True),
         sa.Column("avatar_url", sa.String(), nullable=True),
@@ -37,11 +37,9 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["user_id"], ["users.user_id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("provider", "provider_user_id", name="uq_caret_users_provider_user"),
         sa.UniqueConstraint("user_id", name="uq_caret_users_user"),
     )
     op.create_index(op.f("ix_caret_users_provider"), "caret_users", ["provider"], unique=False)
-    op.create_index(op.f("ix_caret_users_provider_user_id"), "caret_users", ["provider_user_id"], unique=False)
     op.create_index(op.f("ix_caret_users_user_id"), "caret_users", ["user_id"], unique=False)
 
     op.create_table(
@@ -72,6 +70,5 @@ def downgrade() -> None:
     op.drop_table("session_tokens")
 
     op.drop_index(op.f("ix_caret_users_user_id"), table_name="caret_users")
-    op.drop_index(op.f("ix_caret_users_provider_user_id"), table_name="caret_users")
     op.drop_index(op.f("ix_caret_users_provider"), table_name="caret_users")
     op.drop_table("caret_users")

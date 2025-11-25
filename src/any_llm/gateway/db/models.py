@@ -192,7 +192,7 @@ class CaretUser(Base):
     id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.user_id", ondelete="CASCADE"), unique=True, index=True)
     provider: Mapped[str] = mapped_column(index=True)
-    provider_user_id: Mapped[str] = mapped_column(index=True)
+    role: Mapped[str] = mapped_column()
     email: Mapped[str | None] = mapped_column()
     name: Mapped[str | None] = mapped_column()
     avatar_url: Mapped[str | None] = mapped_column()
@@ -215,7 +215,7 @@ class CaretUser(Base):
             "id": self.id,
             "user_id": self.user_id,
             "provider": self.provider,
-            "provider_user_id": self.provider_user_id,
+            "role": self.role,
             "email": self.email,
             "name": self.name,
             "avatar_url": self.avatar_url,

@@ -19,9 +19,9 @@
 
 # 플로우
 ## 가입 + 로그인 (소셜)
-1) 소셜 토큰 검증 → 프로필 정규화(`provider`, `provider_user_id`, `email`, `name`, `avatar`, ...).
+1) 소셜 토큰 검증 → 프로필 정규화(`provider`, `role`, `email`, `name`, `avatar`, ...).
 2) 요청 본문: `provider`, `access_token`, `email?`, `name?`, `avatar_url?`, `device_type/device_id/os/app_version/user_agent/ip`(선택), `metadata`.
-3) `(provider, provider_user_id)` 미존재 시 가입:
+3) `(provider)` 미존재 시 가입:
    - budgets: 기본 예산 레코드 생성(기본값/기간은 설정에 따름).
    - users: 새 user 생성, `budget_id` 연결, `budget_started_at/next_budget_reset_at` 초기화.
    - api_keys: 새 키 생성, `user_id`에 연결(평문 1회 응답).
@@ -29,7 +29,6 @@
 4) 이미 존재 시 기존 budget/user/api_key 재사용.
 5) access + refresh 토큰 발급(JWT는 `api_key_id`를 품어 예산/사용량 추적을 이어감). 세션 토큰(`session_tokens`)에는 디바이스/클라이언트 정보(`metadata`)를 저장.
 6) 응답 예시 필드: `is_new_user`, `user`, `budget`, `api_key`(신규 시만 평문), `access_token`, `access_token_expires_at`, `refresh_token`, `refresh_token_expires_at`.
-> 주의: 현재 구현은 `_normalize_profile`이 자리표시자이므로 provider_user_id를 `provider+access_token` 해시로 만들고, email/name/avatar는 요청에 전달된 값만 사용합니다. 실제 프로바이더 검증/프로필 조회 로직으로 교체해야 합니다.
 
 ## API 호출
 - `X-AnyLLM-Key`에 access JWT 또는 API 키를 전달.
@@ -58,7 +57,7 @@
 - `api_keys`: `id`, `key_hash`, `key_name`, `user_id`, `expires_at`, `is_active`, `metadata`, `created_at`, `last_used_at`.
 - `users`: `user_id`, `budget_id`, `spend`, `budget_started_at`, `next_budget_reset_at`, `blocked`, `metadata`, 타임스탬프.
 - `budgets`: `budget_id`, `max_budget`, `budget_duration_sec`, 타임스탬프.
-- `caret_users`: `id`, `user_id` FK, `provider`, `provider_user_id`(유니크), `email`, `name`, `avatar_url`, `refresh_token?`, `access_token_expires_at`, `last_login_at`, `metadata`, 타임스탬프.
+- `caret_users`: `id`, `user_id` FK, `provider`, `role`, `email`, `name`, `avatar_url`, `refresh_token?`, `access_token_expires_at`, `last_login_at`, `metadata`, 타임스탬프.
 - `session_tokens`: `id/jti`, `user_id`, `api_key_id`, `refresh_token_hash`, `refresh_expires_at`, `revoked_at`, `created_at`, `last_used_at`, `metadata`(디바이스/클라이언트 정보).
 - 프로필 API 사용량 집계: 기간별(`24h/7d/30d`) `requests`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `cost` 합계 + 최근 로그 일부.
 

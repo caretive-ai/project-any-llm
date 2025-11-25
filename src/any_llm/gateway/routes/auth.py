@@ -1,4 +1,3 @@
-import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
@@ -46,34 +45,12 @@ class LogoutRequest(BaseModel):
     refresh_token: str
 
 
-class UserInfo(BaseModel):
-    """사용자 요약."""
-
-    user_id: str
-    alias: str | None
-    spend: float
-    budget_id: str | None
-    blocked: bool
-    metadata: dict[str, Any]
-
-
 class BudgetInfo(BaseModel):
     """예산 요약."""
 
     budget_id: str
     max_budget: float | None
     budget_duration_sec: int | None
-
-
-class CaretUserInfo(BaseModel):
-    """소셜 계정 요약."""
-
-    provider: str
-    provider_user_id: str
-    email: str | None
-    name: str | None
-    avatar_url: str | None
-    metadata: dict[str, Any]
 
 
 class TokenBundle(BaseModel):
@@ -88,19 +65,13 @@ class TokenBundle(BaseModel):
 class LoginResponse(BaseModel):
     """로그인/가입 응답."""
 
-    is_new_user: bool
-    user: UserInfo
-    caret_user: CaretUserInfo
-    budget: BudgetInfo
-    api_key: str | None
     tokens: TokenBundle
 
 
 class MeResponse(BaseModel):
     """내 정보 응답."""
 
-    user: UserInfo
-    caret_user: CaretUserInfo | None
+    profile: dict[str, Any]
     budget: BudgetInfo | None
     api_key_id: str | None
 
@@ -109,23 +80,20 @@ def _normalize_profile(request: SocialLoginRequest) -> dict[str, Any]:
     """소셜 토큰을 검증/정규화한다.
 
     실제 프로바이더 검증 로직은 이 함수에 통합해 교체한다.
-    현재 구현은 토큰 해시를 provider_user_id로 사용하여 형식만 맞춘다.
     """
-    provider_user_id = hashlib.sha256(f"{request.provider}:{request.access_token}".encode()).hexdigest()
     return {
         "provider": request.provider,
-        "provider_user_id": provider_user_id,
         "email": request.email,
         "name": request.name,
         "avatar_url": request.avatar_url,
         "metadata": request.metadata or {},
         "device": {
-            "device_type": request.device_type,
-            "device_id": request.device_id,
-            "os": request.os,
-            "app_version": request.app_version,
-            "user_agent": request.user_agent,
-            "ip": request.ip,
+            "device_type": request.device_type or "web",
+            "device_id": request.device_id or "",
+            "os": request.os or "",
+            "app_version": request.app_version or "",
+            "user_agent": request.user_agent or "",
+            "ip": request.ip or "",
         },
     }
 
@@ -203,14 +171,7 @@ async def social_login(
     """소셜 로그인 및 신규 가입."""
     profile = _normalize_profile(request)
 
-    caret_user = (
-        db.query(CaretUser)
-        .filter(
-            CaretUser.provider == profile["provider"],
-            CaretUser.provider_user_id == profile["provider_user_id"],
-        )
-        .first()
-    )
+    caret_user = db.query(CaretUser).filter(CaretUser.provider == profile["provider"]).first()
 
     is_new_user = caret_user is None
     budget: Budget
@@ -219,18 +180,18 @@ async def social_login(
     raw_api_key: str | None = None
 
     if is_new_user:
-        budget = Budget(max_budget=None, budget_duration_sec=None)
+        budget = Budget(max_budget=1.0, budget_duration_sec=2_592_000)
         db.add(budget)
         db.flush()
 
         user = User(
-            user_id=f"{profile['provider']}-{profile['provider_user_id']}",
+            user_id=str(uuid.uuid4()),
             alias=profile.get("name"),
             budget_id=budget.budget_id,
             blocked=False,
             metadata_=request.metadata,
             budget_started_at=datetime.now(UTC),
-            next_budget_reset_at=None,
+            next_budget_reset_at=datetime.now(UTC) + timedelta(days=30),
         )
         db.add(user)
         db.flush()
@@ -240,8 +201,8 @@ async def social_login(
         caret_user = CaretUser(
             user_id=user.user_id,
             provider=profile["provider"],
-            provider_user_id=profile["provider_user_id"],
             email=profile.get("email"),
+            role="user",
             name=profile.get("name"),
             avatar_url=profile.get("avatar_url"),
             metadata_=profile.get("metadata") or {},
@@ -252,9 +213,6 @@ async def social_login(
         user = db.query(User).filter(User.user_id == caret_user.user_id).first()
         if not user:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Linked user missing")
-        budget = db.query(Budget).filter(Budget.budget_id == user.budget_id).first() if user.budget_id else None
-        api_key, raw_api_key = _get_or_create_api_key(db, user.user_id, allow_create=False)
-        caret_user.last_login_at = datetime.now(UTC)
 
     access_token, refresh_token, access_exp, refresh_exp = _issue_tokens(
         config,
@@ -265,32 +223,7 @@ async def social_login(
     )
     db.commit()
 
-    budget_info = BudgetInfo(
-        budget_id=budget.budget_id if budget else "",
-        max_budget=budget.max_budget if budget else None,
-        budget_duration_sec=budget.budget_duration_sec if budget else None,
-    )
-
     return LoginResponse(
-        is_new_user=is_new_user,
-        user=UserInfo(
-            user_id=user.user_id,
-            alias=user.alias,
-            spend=float(user.spend),
-            budget_id=user.budget_id,
-            blocked=bool(user.blocked),
-            metadata=dict(user.metadata_) if user.metadata_ else {},
-        ),
-        caret_user=CaretUserInfo(
-            provider=caret_user.provider,
-            provider_user_id=caret_user.provider_user_id,
-            email=caret_user.email,
-            name=caret_user.name,
-            avatar_url=caret_user.avatar_url,
-            metadata=dict(caret_user.metadata_) if caret_user.metadata_ else {},
-        ),
-        budget=budget_info,
-        api_key=raw_api_key,
         tokens=TokenBundle(
             access_token=access_token,
             access_token_expires_at=access_exp.isoformat(),
@@ -401,27 +334,23 @@ async def me(
     caret_user = db.query(CaretUser).filter(CaretUser.user_id == resolved_user_id).first()
     budget = db.query(Budget).filter(Budget.budget_id == user.budget_id).first() if user.budget_id else None
 
+    profile_payload: dict[str, Any] = {
+        "user_id": user.user_id,
+        "alias": user.alias,
+        "provider": caret_user.provider if caret_user else None,
+        "email": (caret_user.email if caret_user else None)
+        or (dict(user.metadata_).get("email") if user.metadata_ else None),
+        "name": caret_user.name if caret_user else None,
+        "avatar_url": caret_user.avatar_url if caret_user else None,
+        "blocked": bool(user.blocked),
+        "spend": float(user.spend),
+        "budget_id": user.budget_id,
+        "user_metadata": dict(user.metadata_) if user.metadata_ else {},
+        "provider_metadata": dict(caret_user.metadata_) if caret_user and caret_user.metadata_ else {},
+    }
+
     return MeResponse(
-        user=UserInfo(
-            user_id=user.user_id,
-            alias=user.alias,
-            spend=float(user.spend),
-            budget_id=user.budget_id,
-            blocked=bool(user.blocked),
-            metadata=dict(user.metadata_) if user.metadata_ else {},
-        ),
-        caret_user=(
-            CaretUserInfo(
-                provider=caret_user.provider,
-                provider_user_id=caret_user.provider_user_id,
-                email=caret_user.email,
-                name=caret_user.name,
-                avatar_url=caret_user.avatar_url,
-                metadata=dict(caret_user.metadata_) if caret_user.metadata_ else {},
-            )
-            if caret_user
-            else None
-        ),
+        profile=profile_payload,
         budget=(
             BudgetInfo(
                 budget_id=budget.budget_id,

@@ -90,3 +90,7 @@ curl http://localhost:8000/health
 
 ## 9) 기타 라우트
 - `/v1/keys`, `/v1/users`, `/v1/budgets`, `/v1/pricing`, `/health` 등은 `X-AnyLLM-Key: Bearer <MASTER_KEY>`로 접근.
+
+## 10) 파일 수정후 결과 확인
+uv pip install '.[gateway]'
+any-llm-gateway serve --config config.yml

@@ -28,7 +28,7 @@ class ProfileInfo(BaseModel):
 
     user_id: str
     provider: str | None
-    provider_user_id: str | None
+    role: str | None
     alias: str | None
     name: str | None
     email: str | None
@@ -71,7 +71,7 @@ class ProfileResponse(BaseModel):
     profile: ProfileInfo
     budget: BudgetInfo | None
     usage: dict[str, UsageWindow]
-    recent_usage: list[UsageLogItem]
+    # recent_usage: list[UsageLogItem]
 
 
 class UsageBucket(BaseModel):
@@ -216,8 +216,8 @@ def _recent_usage(db: Session, user_id: str, limit: int) -> list[UsageLogItem]:
 async def get_profile(
     auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[str | None, Query(default=None, description="마스터 키 사용 시 조회할 user_id")],
-    recent_limit: Annotated[int, Query(default=10, ge=0, le=100, description="최근 사용 로그 개수")],
+    user: str | None = Query(None, description="마스터 키 사용 시 조회할 user_id"),
+    recent_limit: int = Query(10, ge=0, le=100, description="최근 사용 로그 개수"),
 ) -> ProfileResponse:
     """프로필 + 예산 + 사용량 집계 반환."""
     target_user_id = _resolve_target_user(auth_result, user)
@@ -235,12 +235,12 @@ async def get_profile(
         "last_30d": _aggregate_usage(db, target_user_id, now - timedelta(days=30)),
     }
 
-    recent_logs = _recent_usage(db, target_user_id, recent_limit)
+    # recent_logs = _recent_usage(db, target_user_id, recent_limit)
 
     profile = ProfileInfo(
         user_id=user_obj.user_id,
         provider=caret.provider if caret else None,
-        provider_user_id=caret.provider_user_id if caret else None,
+        role=caret.role if caret else None,
         alias=user_obj.alias,
         name=caret.name if caret else user_obj.alias,
         email=caret.email if caret else None,
@@ -268,7 +268,7 @@ async def get_profile(
         profile=profile,
         budget=budget_info,
         usage=usage_windows,
-        recent_usage=recent_logs,
+        # recent_usage=recent_logs,
     )
 
 
@@ -276,10 +276,10 @@ async def get_profile(
 async def get_profile_usage(
     auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[str | None, Query(default=None, description="마스터 키 사용 시 조회할 user_id")],
-    start: Annotated[datetime | None, Query(default=None, description="집계 시작 시각(ISO). 기본: now-30d")],
-    end: Annotated[datetime | None, Query(default=None, description="집계 종료 시각(ISO). 기본: now")],
-    group_by: Annotated[Literal["day", "week", "total"], Query(default="day", description="집계 단위")] = "day",
+    user: str | None = Query(None, description="마스터 키 사용 시 조회할 user_id"),
+    start: datetime | None = Query(None, description="집계 시작 시각(ISO). 기본: now-30d"),
+    end: datetime | None = Query(None, description="집계 종료 시각(ISO). 기본: now"),
+    group_by: Literal["day", "week", "total"] = Query("day", description="집계 단위"),
 ) -> UsageBucketsResponse:
     """사용량 집계(기간별)."""
     target_user_id = _resolve_target_user(auth_result, user)
@@ -375,7 +375,7 @@ def _aggregate_range(db: Session, user_id: str, start: datetime, end: datetime) 
 async def list_profile_keys(
     auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[str | None, Query(default=None, description="마스터 키 사용 시 조회할 user_id")],
+    user: str | None = Query(None, description="마스터 키 사용 시 조회할 user_id"),
 ) -> list[KeySummary]:
     """사용자의 API 키 메타 조회(평문 키 미노출)."""
     target_user_id = _resolve_target_user(auth_result, user)
@@ -406,23 +406,23 @@ async def list_profile_keys(
 async def list_profile_logs(
     auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[str | None, Query(default=None, description="마스터 키 사용 시 조회할 user_id")],
-    limit: Annotated[int, Query(default=50, ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(default=0, ge=0)] = 0,
-    start: Annotated[datetime | None, Query(default=None, description="시작 시각(ISO)")] = None,
-    end: Annotated[datetime | None, Query(default=None, description="종료 시각(ISO)")] = None,
-    status: Annotated[str | None, Query(default=None, description="success 또는 error")] = None,
-    model: Annotated[str | None, Query(default=None, description="모델 키 필터")] = None,
-    provider: Annotated[str | None, Query(default=None, description="프로바이더 필터")] = None,
-    endpoint: Annotated[str | None, Query(default=None, description="엔드포인트 필터")] = None,
-    min_prompt_tokens: Annotated[int | None, Query(default=None)] = None,
-    max_prompt_tokens: Annotated[int | None, Query(default=None)] = None,
-    min_completion_tokens: Annotated[int | None, Query(default=None)] = None,
-    max_completion_tokens: Annotated[int | None, Query(default=None)] = None,
-    min_total_tokens: Annotated[int | None, Query(default=None)] = None,
-    max_total_tokens: Annotated[int | None, Query(default=None)] = None,
-    min_cost: Annotated[float | None, Query(default=None)] = None,
-    max_cost: Annotated[float | None, Query(default=None)] = None,
+    user: str | None = Query(None, description="마스터 키 사용 시 조회할 user_id"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    start: datetime | None = Query(None, description="시작 시각(ISO)"),
+    end: datetime | None = Query(None, description="종료 시각(ISO)"),
+    status: str | None = Query(None, description="success 또는 error"),
+    model: str | None = Query(None, description="모델 키 필터"),
+    provider: str | None = Query(None, description="프로바이더 필터"),
+    endpoint: str | None = Query(None, description="엔드포인트 필터"),
+    min_prompt_tokens: int | None = Query(None),
+    max_prompt_tokens: int | None = Query(None),
+    min_completion_tokens: int | None = Query(None),
+    max_completion_tokens: int | None = Query(None),
+    min_total_tokens: int | None = Query(None),
+    max_total_tokens: int | None = Query(None),
+    min_cost: float | None = Query(None),
+    max_cost: float | None = Query(None),
 ) -> LogsResponse:
     """사용자 로그 목록(필터/페이지네이션)."""
     target_user_id = _resolve_target_user(auth_result, user)
