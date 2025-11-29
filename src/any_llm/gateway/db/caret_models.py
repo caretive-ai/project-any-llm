@@ -116,6 +116,7 @@ class BillingPlan(Base):
 
     subscriptions = relationship("BillingSubscription", back_populates="plan", cascade="all, delete-orphan")
     invoices = relationship("BillingInvoice", back_populates="plan", cascade="all, delete-orphan")
+    transactions = relationship("BillingCreditTransaction", back_populates="plan", cascade="all, delete-orphan")
 
     def to_dict(self) -> dict[str, Any]:
         """Convert model to dictionary."""
@@ -194,6 +195,7 @@ class BillingCreditTransaction(Base):
     lemon_checkout_id: Mapped[str | None] = mapped_column(nullable=True, unique=True)
     lemon_order_id: Mapped[str | None] = mapped_column(nullable=True, unique=True)
     lemon_subscription_id: Mapped[str | None] = mapped_column(nullable=True)
+    plan_id: Mapped[str | None] = mapped_column(ForeignKey("billing_plans.id"), nullable=True)
     metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
@@ -203,6 +205,7 @@ class BillingCreditTransaction(Base):
     )
 
     caret_user = relationship("CaretUser", back_populates="billing_credit_transactions")
+    plan = relationship("BillingPlan", back_populates="transactions")
     invoices = relationship("BillingInvoice", back_populates="transaction", cascade="all, delete-orphan")
     topups = relationship("CreditTopup", back_populates="transaction", cascade="all, delete-orphan")
 
@@ -219,6 +222,7 @@ class BillingCreditTransaction(Base):
             "lemon_checkout_id": self.lemon_checkout_id,
             "lemon_order_id": self.lemon_order_id,
             "lemon_subscription_id": self.lemon_subscription_id,
+            "plan_id": self.plan_id,
             "metadata": self.metadata_,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
@@ -241,10 +245,16 @@ class BillingInvoice(Base):
     status: Mapped[str] = mapped_column()
     total: Mapped[float | None] = mapped_column(nullable=True)
     tax: Mapped[float | None] = mapped_column(nullable=True)
+    tax_name: Mapped[str | None] = mapped_column(nullable=True)
+    tax_rate: Mapped[float | None] = mapped_column(nullable=True)
     credits: Mapped[float | None] = mapped_column(nullable=True)
     currency: Mapped[str] = mapped_column(default="USD")
+    currency_rate: Mapped[float | None] = mapped_column(nullable=True)
     card_brand: Mapped[str | None] = mapped_column(nullable=True)
     card_last_four: Mapped[str | None] = mapped_column(nullable=True)
+    user_name: Mapped[str | None] = mapped_column(nullable=True)
+    user_email: Mapped[str | None] = mapped_column(nullable=True)
+    renews_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
@@ -275,9 +285,12 @@ class BillingInvoice(Base):
             "total": self.total,
             "tax": self.tax,
             "credits": self.credits,
-            "currency": self.currency,
-            "card_brand": self.card_brand,
-            "card_last_four": self.card_last_four,
+        "currency": self.currency,
+        "card_brand": self.card_brand,
+        "card_last_four": self.card_last_four,
+        "user_name": self.user_name,
+        "user_email": self.user_email,
+        "renews_at": self.renews_at.isoformat() if self.renews_at else None,
             "metadata": self.metadata_,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
