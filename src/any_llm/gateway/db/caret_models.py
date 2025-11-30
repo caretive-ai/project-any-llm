@@ -152,9 +152,7 @@ class BillingSubscription(Base):
     start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     renew_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    lemon_subscription_id: Mapped[str | None] = mapped_column(nullable=True)
-    lemon_customer_id: Mapped[str | None] = mapped_column(nullable=True)
-    lemon_checkout_id: Mapped[str | None] = mapped_column(nullable=True)
+    transaction_id: Mapped[str | None] = mapped_column(ForeignKey("billing_credit_transactions.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -384,17 +382,11 @@ class CreditTopup(Base):
     credits_per_usd: Mapped[float | None] = mapped_column(nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source: Mapped[str] = mapped_column(index=True)
-    reference_id: Mapped[str | None] = mapped_column(nullable=True, index=True)
     transaction_id: Mapped[str | None] = mapped_column(ForeignKey("billing_credit_transactions.id", ondelete="SET NULL"), nullable=True, index=True)
-    invoice_id: Mapped[str | None] = mapped_column(ForeignKey("billing_invoices.id", ondelete="SET NULL"), nullable=True, index=True)
-    lemon_order_id: Mapped[str | None] = mapped_column(nullable=True)
-    lemon_checkout_id: Mapped[str | None] = mapped_column(nullable=True)
-    lemon_subscription_id: Mapped[str | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
 
     transaction = relationship("BillingCreditTransaction", back_populates="topups")
-    invoice = relationship("BillingInvoice", back_populates="topups")
     caret_user = relationship("CaretUser", back_populates="credit_topups")
 
     def to_dict(self) -> dict[str, Any]:
@@ -408,12 +400,7 @@ class CreditTopup(Base):
             "credits_per_usd": self.credits_per_usd,
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "source": self.source,
-            "reference_id": self.reference_id,
             "transaction_id": self.transaction_id,
-            "invoice_id": self.invoice_id,
-            "lemon_order_id": self.lemon_order_id,
-            "lemon_checkout_id": self.lemon_checkout_id,
-            "lemon_subscription_id": self.lemon_subscription_id,
             "metadata": self.metadata_,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

@@ -286,7 +286,6 @@ def _ensure_free_plan_and_balance(db: Session, user_id: str, now: datetime) -> N
         credits_per_usd=float(plan.credits_per_usd),
         expires_at=expires_at,
         source="SUBSCRIPTION_RENEWAL",
-        reference_id=plan.id,
         metadata_={"seeded": True},
     )
     db.add(topup)
