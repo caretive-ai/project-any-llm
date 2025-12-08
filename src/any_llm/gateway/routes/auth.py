@@ -226,21 +226,6 @@ def jwt_exp(token: str) -> int:
 
 def _ensure_free_plan_and_balance(db: Session, user_id: str, now: datetime) -> None:
     """Seed free subscription plan/subscription and credit pools for new users."""
-    plan = db.query(BillingPlan).filter(BillingPlan.name == "FREE").first()
-    if not plan:
-        plan = BillingPlan(
-            name="FREE",
-            monthly_credits=10.0,
-            price_usd=0.0,
-            currency="USD",
-            credits_per_usd=10.0,
-            renew_interval_days=30,
-            features={},
-            active=True,
-        )
-        db.add(plan)
-        db.flush()
-
     subscription = (
         db.query(BillingSubscription)
         .filter(BillingSubscription.user_id == user_id, BillingSubscription.status == "ACTIVE")
