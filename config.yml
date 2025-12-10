@@ -1,0 +1,63 @@
+# Configuration for any-llm-gateway
+
+# Database connection URL
+database_url: "postgresql://caret_team:caret_team93*K@34.47.98.74:38870/caret_team"
+
+# Server configuration - if you want to use a different port, change it here and in the docker-compose.yml file.
+host: "0.0.0.0"
+port: 8000
+
+# Master key for protecting key management endpoints
+master_key: 5tE4LxUuUTQjxaTc7iFmo1e2wFXxY-Ju-mvjBGh5-tM
+
+# JWT / 세션 토큰 설정
+# jwt_secret을 비워두면 master_key로 서명합니다.
+jwt_secret: "3_oie09wtvs0Dp2dnZp9soKGhDY51556kvjM1loLFAQ"
+access_token_exp_minutes: 1440   # Access token 수명(분)
+refresh_token_exp_days: 14     # Refresh token 수명(일)
+auth_base_url: https://caret.team
+
+# Pre-configured provider credentials
+providers:
+  vertexai:
+    # Vertex AI is a unique case in that it requires a service account JSON file, project ID, and location. See src/any_llm/gateway/auth/vertex_auth.py for more details.
+    credentials: "/app/service_account.json" # Internal docker path as mapped in docker-compose.yml,
+    project: YOUR_GCP_PROJECT_ID_HERE
+    location: "us-central1"
+
+  openai:
+    api_key: YOUR_OPENAI_API_KEY_HERE
+    api_base: "https://api.openai.com/v1"  # optional
+
+  anthropic:
+    api_key: YOUR_ANTHROPIC_API_KEY_HERE
+
+  mistral:
+    api_key: YOUR_MISTRAL_API_KEY_HERE
+
+  gemini:
+    api_key: AIzaSyAOzNGl2gdQb22OWVzqksuvhYuYnFofPcg
+
+  # Add more providers as needed...
+
+# Model pricing configuration (optional but necessary for price tracking)
+# Format: "provider:model" -> input/output price per million tokens
+# Database pricing takes precedence - config only sets initial values
+# Prices are in USD per million tokens
+pricing:
+  # See https://cloud.google.com/vertex-ai/generative-ai/pricing
+  # vertexai:Qwen3-235B-A22B-Instruct-2507:
+  #   input_price_per_million: 0.25
+  #   output_price_per_million: 1.00
+  openai:gpt-5:
+    input_price_per_million: 1.25
+    output_price_per_million: 10.00
+  gemini:gemini-3-pro-preview:
+    input_price_per_million: 2.00
+    output_price_per_million: 12.00
+  gemini:gemini-2.5-pro:
+    input_price_per_million: 1.25
+    output_price_per_million: 10.00
+  gemini:gemini-2.5-flash:
+    input_price_per_million: 0.30
+    output_price_per_million: 2.50
