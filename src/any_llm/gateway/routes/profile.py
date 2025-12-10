@@ -213,6 +213,7 @@ def _aggregate_usage(db: Session, user_id: str, since: datetime) -> UsageWindow:
 
 def _recent_usage(db: Session, user_id: str, limit: int) -> list[UsageLogItem]:
     """최근 사용 로그."""
+    limit = limit or 20  # Default to 20 when 0/None provided
     logs = (
         db.query(UsageLog)
         .filter(UsageLog.user_id == user_id)
@@ -542,14 +543,20 @@ async def list_profile_payments(
 
     payments: list[PaymentRecord] = []
     for row in rows:
-        amount = int(row["amount_cents"]) if row["amount_cents"] is not None else 0
-        credits = int(row["credits"]) if row["credits"] is not None else 0
-        created_at = row["created_at"].isoformat() if row["created_at"] else ""
+        # Support tuple/Row/_mapping depending on SQLAlchemy version/driver
+        row_map = row._mapping if hasattr(row, "_mapping") else row
+        amount_raw = row_map["amount_cents"] if "amount_cents" in row_map else None
+        credits_raw = row_map["credits"] if "credits" in row_map else None
+        created_raw = row_map["created_at"] if "created_at" in row_map else None
+
+        amount = int(amount_raw) if amount_raw is not None else 0
+        credits = int(credits_raw) if credits_raw is not None else 0
+        created_at = created_raw.isoformat() if created_raw else ""
 
         payments.append(
             PaymentRecord(
                 paidAt=created_at,
-                creatorId=row["user_id"] or "",
+                creatorId=row_map["user_id"] if "user_id" in row_map and row_map["user_id"] else "",
                 amountCents=amount,
                 credits=credits,
             )
