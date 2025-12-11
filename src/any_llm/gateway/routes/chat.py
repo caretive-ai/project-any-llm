@@ -78,16 +78,70 @@ def _get_provider_credentials(
     return credentials
 
 
+def _build_model_key(provider: str | LLMProvider | None, model: str) -> str:
+    provider_value = provider.value if isinstance(provider, LLMProvider) else provider
+    return f"{provider_value}:{model}" if provider_value else model
+
+
+def _get_model_pricing(
+    db: Session,
+    provider: str | LLMProvider | None,
+    model: str,
+) -> tuple[str, ModelPricing | None]:
+    """Resolve model key and fetch pricing once for reuse."""
+    model_key = _build_model_key(provider, model)
+    pricing = db.query(ModelPricing).filter(ModelPricing.model_key == model_key).first()
+    return model_key, pricing
+
+
+def _calculate_usage_cost(usage_data: CompletionUsage, pricing: ModelPricing) -> float:
+    prompt_tokens = usage_data.prompt_tokens or 0
+    completion_tokens = usage_data.completion_tokens or 0
+    return (prompt_tokens / 1_000_000) * pricing.input_price_per_million + (
+        completion_tokens / 1_000_000
+    ) * pricing.output_price_per_million
+
+
+def _maybe_attach_cost_to_usage(
+    usage: CompletionUsage | None,
+    pricing: ModelPricing | None,
+) -> CompletionUsage | None:
+    """Fill missing usage.cost when pricing is available and tokens are present."""
+    if not usage or not pricing:
+        return usage
+
+    if getattr(usage, "cost", None) is not None:
+        return usage
+
+    prompt_tokens = usage.prompt_tokens or 0
+    completion_tokens = usage.completion_tokens or 0
+    if prompt_tokens == 0 and completion_tokens == 0:
+        return usage
+
+    cost = _calculate_usage_cost(usage, pricing)
+    try:
+        usage.cost = cost  # type: ignore[attr-defined]
+        return usage
+    except Exception:
+        try:
+            return usage.model_copy(update={"cost": cost})
+        except Exception:
+            logger.debug("Failed to attach cost to usage data; continuing without cost.")
+            return usage
+
+
 async def _log_usage(
     db: Session,
     api_key_obj: APIKey | None,
     model: str,
-    provider: str | None,
+    provider: str | LLMProvider | None,
     endpoint: str,
     user_id: str | None = None,
     response: ChatCompletion | AsyncIterator[ChatCompletionChunk] | None = None,
     usage_override: CompletionUsage | None = None,
     error: str | None = None,
+    model_key: str | None = None,
+    model_pricing: ModelPricing | None = None,
 ) -> str | None:
     """Log API usage to database and update user spend.
 
@@ -100,6 +154,8 @@ async def _log_usage(
         user_id: User identifier for tracking
         response: Response object (if successful)
         usage_override: Usage data for streaming requests
+        model_key: Precomputed model key for pricing lookup
+        model_pricing: Pre-fetched pricing to avoid repeated DB queries
         error: Error message (if failed)
 
     """
@@ -124,13 +180,13 @@ async def _log_usage(
         usage_log.completion_tokens = usage_data.completion_tokens
         usage_log.total_tokens = usage_data.total_tokens
 
-        model_key = f"{provider}:{model}" if provider else model
-        pricing = db.query(ModelPricing).filter(ModelPricing.model_key == model_key).first()
+        resolved_model_key = model_key or _build_model_key(provider, model)
+        pricing = model_pricing
+        if pricing is None:
+            _, pricing = _get_model_pricing(db, provider, model)
 
         if pricing:
-            cost = (usage_data.prompt_tokens / 1_000_000) * pricing.input_price_per_million + (
-                usage_data.completion_tokens / 1_000_000
-            ) * pricing.output_price_per_million
+            cost = _calculate_usage_cost(usage_data, pricing)
             usage_log.cost = cost
 
             if user_id:
@@ -138,7 +194,7 @@ async def _log_usage(
                 if user:
                     user.spend = float(user.spend) + cost
         else:
-            logger.warning(f"No pricing configured for model '{model_key}'. Usage will be tracked without cost.")
+            logger.warning(f"No pricing configured for model '{resolved_model_key}'. Usage will be tracked without cost.")
 
     db.add(usage_log)
     try:
@@ -179,7 +235,7 @@ async def chat_completions(
     validate_user_credit(db, user_id)
 
     provider, model = AnyLLM.split_model_provider(request.model)
-    model_key = f"{provider.value}:{model}" if provider else model
+    model_key, model_pricing = _get_model_pricing(db, provider, model)
     credentials = _get_provider_credentials(config, provider)
 
     completion_kwargs = request.model_dump()
@@ -197,6 +253,7 @@ async def chat_completions(
                     stream: AsyncIterator[ChatCompletionChunk] = await acompletion(**completion_kwargs)  # type: ignore[assignment]
                     async for chunk in stream:
                         if chunk.usage:
+                            chunk.usage = _maybe_attach_cost_to_usage(chunk.usage, model_pricing)
                             # Prompt tokens should be constant, take first non-zero value
                             if chunk.usage.prompt_tokens and not prompt_tokens:
                                 prompt_tokens = chunk.usage.prompt_tokens
@@ -224,6 +281,8 @@ async def chat_completions(
                             endpoint="/v1/chat/completions",
                             user_id=user_id,
                             usage_override=usage_data,
+                            model_key=model_key,
+                            model_pricing=model_pricing,
                         )
                         charge_usage_cost(
                             db,
@@ -243,6 +302,8 @@ async def chat_completions(
                         provider=provider,
                         endpoint="/v1/chat/completions",
                         user_id=user_id,
+                        model_key=model_key,
+                        model_pricing=model_pricing,
                         error=str(e),
                     )
                     raise
@@ -259,6 +320,8 @@ async def chat_completions(
             endpoint="/v1/chat/completions",
             user_id=user_id,
             response=response,
+            model_key=model_key,
+            model_pricing=model_pricing,
         )
         charge_usage_cost(
             db,
@@ -276,6 +339,8 @@ async def chat_completions(
             provider=provider,
             endpoint="/v1/chat/completions",
             user_id=user_id,
+            model_key=model_key,
+            model_pricing=model_pricing,
             error=str(e),
         )
         raise HTTPException(

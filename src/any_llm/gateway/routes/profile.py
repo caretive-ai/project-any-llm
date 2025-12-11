@@ -487,7 +487,7 @@ async def list_profile_logs(
         db.query(UsageLog)
         .filter(UsageLog.user_id == target_user_id, UsageLog.timestamp >= start_dt)
         .order_by(UsageLog.timestamp.desc())
-        .limit(100)
+        .limit(30)
         .all()
     )
 
