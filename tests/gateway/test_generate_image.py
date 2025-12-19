@@ -24,10 +24,17 @@ def test_generate_image_returns_base64_png(
     class _FakePart:
         def __init__(self) -> None:
             self.inline_data = _FakeInlineData()
+            self.text = "caption"
+            self.thought = False
+
+    class _FakeThoughtPart:
+        def __init__(self) -> None:
+            self.text = "thinking"
+            self.thought = True
 
     class _FakeResponse:
         def __init__(self) -> None:
-            self.parts = [_FakePart()]
+            self.parts = [_FakeThoughtPart(), _FakePart()]
 
     class _FakeModels:
         def generate_content(self, *, model: str, contents, config) -> _FakeResponse:  # noqa: ANN001
@@ -66,3 +73,5 @@ def test_generate_image_returns_base64_png(
 
     assert data["mimeType"] == "image/png"
     assert data["base64"] == base64.b64encode(b"fake-png-bytes").decode("utf-8")
+    assert data["texts"] == ["caption"]
+    assert data["thoughts"] == ["thinking"]

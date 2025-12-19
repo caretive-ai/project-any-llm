@@ -31,6 +31,8 @@ class GenerateImageRequest(BaseModel):
 class GenerateImageResponse(BaseModel):
     mimeType: str
     base64: str
+    texts: list[str] = Field(default_factory=list)
+    thoughts: list[str] = Field(default_factory=list)
 
 
 def _get_gemini_api_key(config: GatewayConfig) -> str:
@@ -75,17 +77,22 @@ async def generate_image(
 
     try:
         client = genai.Client(api_key=api_key)
-        image_config = None
-        if request.aspect_ratio or request.image_size:
-            image_config = genai.types.ImageConfig(
-                aspect_ratio=request.aspect_ratio,
-                image_size=request.image_size,
-            )
+        aspect_ratio = request.aspect_ratio or "16:9"
+        image_size = request.image_size or "4K"
+        image_config = genai.types.ImageConfig(
+            aspect_ratio=aspect_ratio,
+            image_size=image_size,
+        )
 
-        config_kwargs: dict[str, object] = {"response_modalities": ["Text", "Image"]}
-        if image_config is not None:
-            config_kwargs["image_config"] = image_config
+        config_kwargs: dict[str, object] = {
+            "response_modalities": ["Text", "Image"],
+            "image_config": image_config,
+        }
 
+        config_kwargs["tools"] = [{"google_search": {}}]
+        config_kwargs["thinking_config"] = genai.types.ThinkingConfig(
+            include_thoughts=True
+        )
         resp = client.models.generate_content(
             model=model_id,
             contents=[request.prompt],
@@ -98,12 +105,29 @@ async def generate_image(
         ) from e
 
     parts = getattr(resp, "parts", None) or []
+    texts: list[str] = []
+    thoughts: list[str] = []
     image_bytes: bytes | None = None
     mime_type: str = "image/png"
     for part in parts:
+        text_value = getattr(part, "text", None)
+        if isinstance(text_value, str) and text_value:
+            if getattr(part, "thought", False):
+                thoughts.append(text_value)
+            else:
+                texts.append(text_value)
+
         inline_data = getattr(part, "inline_data", None)
         data = getattr(inline_data, "data", None) if inline_data is not None else None
         candidate_mime_type = getattr(inline_data, "mime_type", None) if inline_data is not None else None
+        logger.info(
+            "image part summary: has_text=%s thought=%s has_inline=%s mime_type=%s data_len=%s",
+            bool(text_value),
+            bool(getattr(part, "thought", False)),
+            bool(inline_data),
+            candidate_mime_type,
+            len(data) if isinstance(data, (bytes, bytearray)) else None,
+        )
         if not data:
             continue
         if isinstance(data, bytearray):
@@ -122,4 +146,4 @@ async def generate_image(
         )
 
     base64_str = base64.b64encode(image_bytes).decode("utf-8")
-    return GenerateImageResponse(mimeType=mime_type, base64=base64_str)
+    return GenerateImageResponse(mimeType=mime_type, base64=base64_str, texts=texts, thoughts=thoughts)
