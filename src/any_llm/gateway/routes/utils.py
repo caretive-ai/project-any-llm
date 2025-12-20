@@ -70,6 +70,23 @@ def _estimate_cost_usd(
         + (completion_tokens / 1_000_000) * pricing.output_price_per_million
     )
 
+def _estimate_cost_image_usd(
+    pricing: ModelPricing,
+    prompt_tokens: int,
+    completion_tokens: int,
+    thought_tokens: int = 0,
+) -> float:
+    """Convert prompt/completion counts to USD using pricing."""
+    thought_price = pricing.cached_price_per_million
+    if thought_price is None:
+        thought_price = pricing.input_price_per_million
+
+    return (
+        (prompt_tokens / 1_000_000) * pricing.input_price_per_million
+        + (completion_tokens / 1_000_000) * pricing.output_price_per_million
+        + (thought_tokens / 1_000_000) *thought_price
+    )    
+
 def resolve_target_user(
     auth_result: Tuple[APIKey | None, bool, str | None, SessionToken | None],
     explicit_user: str | None,
@@ -224,8 +241,12 @@ def charge_usage_cost(
 
     prompt = getattr(usage, "prompt_tokens", 0) or 0
     completion = getattr(usage, "completion_tokens", 0) or 0
-    cached = _get_cached_prompt_tokens(usage) or 0
-    cost_usd = _estimate_cost_usd(pricing, prompt, completion, cached_tokens=cached)
+    thought = getattr(usage, "thought_tokens", 0) or 0
+    if thought > 0:
+        cost_usd = _estimate_cost_image_usd(pricing, prompt, completion, thought)
+    else:
+        cached = _get_cached_prompt_tokens(usage) or 0
+        cost_usd = _estimate_cost_usd(pricing, prompt, completion, cached)
 
     if cost_usd <= 0:
         return 0.0
