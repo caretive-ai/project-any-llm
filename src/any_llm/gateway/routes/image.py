@@ -90,9 +90,10 @@ async def generate_image(
         config_kwargs: dict[str, object] = {
             "response_modalities": ["Text", "Image"],
             "image_config": image_config,
+            "candidate_count": 1,
         }
 
-        config_kwargs["tools"] = [{"google_search": {}}]
+        # config_kwargs["tools"] = [{"google_search": {}}]
         config_kwargs["thinking_config"] = genai.types.ThinkingConfig(
             include_thoughts=True
         )
@@ -102,6 +103,11 @@ async def generate_image(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Image generation failed: {e!s}",
         ) from e
+
+    def _sanitize_for_logging(value: str | None) -> str | None:
+        if not value:
+            return None
+        return value.replace("[", "\\[").replace("]", "\\]")
 
     def _iter_parts(chunk) -> list[object]:
         parts = getattr(chunk, "parts", None)
@@ -120,19 +126,12 @@ async def generate_image(
 
     if request.stream:
         try:
-            if hasattr(client.models, "generate_content_stream"):
-                stream = client.models.generate_content_stream(
-                    model=model_id,
-                    contents=[request.prompt],
-                    config=content_config,
-                )
-            else:
-                stream = client.models.generate_content(
-                    model=model_id,
-                    contents=[request.prompt],
-                    config=content_config,
-                    stream=True,
-                )
+            logger.info("Using generate_content_stream")
+            stream = client.models.generate_content_stream(
+                model=model_id,
+                contents=[request.prompt],
+                config=content_config,
+            )
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -141,10 +140,42 @@ async def generate_image(
 
         def event_stream(client_ref=client, stream_ref=stream):
             try:
+                chunk_index = 0
                 for chunk in stream_ref:
-                    for part in _iter_parts(chunk):
+                    chunk_index += 1
+                    parts = _iter_parts(chunk)
+                    logger.info(
+                        "stream chunk %d received with %d parts (prompt_len=%d)",
+                        chunk_index,
+                        len(parts),
+                        len(request.prompt),
+                    )
+                    chunk_usage = getattr(chunk, "usage_metadata", None)
+                    logger.info("chunk_usage: %s", chunk_usage)
+                    if chunk_usage:
+                        logger.info(
+                            "stream chunk %d usage: %s",
+                            chunk_index,
+                            json.dumps(
+                                {
+                                    "prompt_tokens": getattr(chunk_usage, "prompt_token_count", None),
+                                    "completion_tokens": getattr(chunk_usage, "candidates_token_count", None),
+                                    "thought_tokens": getattr(chunk_usage, "thoughts_token_count", None),
+                                    "cached_tokens": getattr(chunk_usage, "cached_content_token_count", None),
+                                    "total_tokens": getattr(chunk_usage, "total_token_count", None),
+                                }
+                            ),
+                        )
+                    for part in parts:
                         text_value = getattr(part, "text", None)
+                        text_snippet = _sanitize_for_logging(text_value)[:120] if isinstance(text_value, str) else None
                         if isinstance(text_value, str) and text_value:
+                            logger.info(
+                                "stream part chunk=%d thought=%s text_snippet=%s",
+                                chunk_index,
+                                bool(getattr(part, "thought", False)),
+                                text_snippet,
+                            )
                             if getattr(part, "thought", False):
                                 yield _format_sse_event(
                                     {"type": "thought", "content": text_value}
@@ -164,6 +195,13 @@ async def generate_image(
                             getattr(inline_data, "mime_type", None)
                             if inline_data is not None
                             else None
+                        )
+                        data_length = len(data) if isinstance(data, (bytes, bytearray)) else None
+                        logger.info(
+                            "stream inline chunk=%d mime=%s data_len=%s",
+                            chunk_index,
+                            candidate_mime_type,
+                            data_length,
                         )
                         if not data:
                             continue
@@ -186,8 +224,10 @@ async def generate_image(
                                 "base64": base64_str,
                             }
                         )
+                logger.info("image stream completed after %d chunk(s)", chunk_index)
                 yield _format_sse_event({"type": "done"})
             except Exception as e:
+                logger.error("image stream failed: %s", str(e))
                 yield _format_sse_event({"type": "error", "message": str(e)})
             finally:
                 try:
@@ -203,6 +243,18 @@ async def generate_image(
             contents=[request.prompt],
             config=content_config,
         )
+        usage_info = getattr(resp, "usage", None)
+        if usage_info:
+            logger.info(
+                "image request usage: %s",
+                json.dumps(
+                    {
+                        "prompt_tokens": getattr(usage_info, "prompt_tokens", None),
+                        "completion_tokens": getattr(usage_info, "completion_tokens", None),
+                        "total_tokens": getattr(usage_info, "total_tokens", None),
+                    }
+                ),
+            )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
