@@ -1,8 +1,10 @@
 import base64
 import json
+import os
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -44,7 +46,57 @@ class ChatCompletionRequest(BaseModel):
     response_format: dict[str, Any] | None = None
 
 
-def _normalize_data_url(value: str) -> str:
+_IMAGE_DUMP_DIR_ENV = "CARET_IMAGE_DUMP_DIR"
+_IMAGE_EXTENSION_BY_MIME = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "image/bmp": "bmp",
+    "image/tiff": "tiff",
+    "image/svg+xml": "svg",
+    "image/heic": "heic",
+    "image/heif": "heif",
+    "image/avif": "avif",
+}
+
+
+def _image_extension(mime_type: str) -> str:
+    normalized = mime_type.strip().lower()
+    if normalized in _IMAGE_EXTENSION_BY_MIME:
+        return _IMAGE_EXTENSION_BY_MIME[normalized]
+    if "/" in normalized:
+        extension = normalized.split("/", 1)[1]
+        return extension.replace("+xml", "").replace("svg", "svg")
+    return "bin"
+
+
+def _get_image_dump_dir() -> Path | None:
+    directory = os.getenv(_IMAGE_DUMP_DIR_ENV)
+    if not directory:
+        return None
+    path = Path(directory).expanduser()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        logger.warning("Failed to create image dump directory %s: %s", path, str(exc))
+        return None
+    return path
+
+
+def _dump_image(image_bytes: bytes, mime_type: str, dump_dir: Path, request_id: str, index: int) -> None:
+    extension = _image_extension(mime_type)
+    filename = f"{request_id}_{index:02d}.{extension}"
+    file_path = dump_dir / filename
+    try:
+        file_path.write_bytes(image_bytes)
+        logger.info("Saved uploaded image to %s", file_path)
+    except Exception as exc:
+        logger.warning("Failed to save uploaded image to %s: %s", file_path, str(exc))
+
+
+def _normalize_data_url(value: str) -> tuple[str, str, bytes]:
     if not value.startswith("data:"):
         raise ValueError("image_url.url must be a data URL or a remote URL")
 
@@ -61,16 +113,20 @@ def _normalize_data_url(value: str) -> str:
         raise ValueError("image_url.url must contain base64 data")
 
     try:
-        base64.b64decode(sanitized_payload, validate=True)
+        image_bytes = base64.b64decode(sanitized_payload, validate=True)
     except Exception as exc:
         raise ValueError("image_url.url contains invalid base64 data") from exc
 
-    return f"{header},{sanitized_payload}"
+    return f"{header},{sanitized_payload}", mime_type, image_bytes
 
 
-def _normalize_images_in_messages(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+def _normalize_images_in_messages(
+    messages: list[dict[str, Any]],
+    request_id: str,
+) -> tuple[list[dict[str, Any]], int]:
     normalized_messages: list[dict[str, Any]] = []
     image_count = 0
+    dump_dir = _get_image_dump_dir()
 
     for message in messages:
         normalized_message = dict(message)
@@ -96,15 +152,20 @@ def _normalize_images_in_messages(messages: list[dict[str, Any]]) -> tuple[list[
 
                     if url.startswith("data:"):
                         try:
-                            url = _normalize_data_url(url)
+                            normalized_url, mime_type, image_bytes = _normalize_data_url(url)
                         except ValueError as exc:
                             raise HTTPException(
                                 status_code=status.HTTP_400_BAD_REQUEST,
                                 detail=str(exc),
                             ) from exc
+                        url = normalized_url
+                        image_count += 1
+                        if dump_dir is not None:
+                            _dump_image(image_bytes, mime_type, dump_dir, request_id, image_count)
+                    else:
+                        image_count += 1
 
                     normalized_content.append({**block, "image_url": {**image_url, "url": url}})
-                    image_count += 1
                 else:
                     normalized_content.append(block)
 
@@ -195,7 +256,7 @@ def _maybe_attach_cost_to_usage(
 
     if getattr(usage, "cost", None) is not None:
         return usage
-        
+
     prompt_tokens = usage.prompt_tokens or 0
     completion_tokens = usage.completion_tokens or 0
     if prompt_tokens == 0 and completion_tokens == 0:
@@ -322,7 +383,8 @@ async def chat_completions(
     model_key, model_pricing = _get_model_pricing(db, provider, model)
     credentials = _get_provider_credentials(config, provider)
 
-    normalized_messages, image_count = _normalize_images_in_messages(request.messages)
+    dump_request_id = f"chat_{uuid.uuid4().hex}"
+    normalized_messages, image_count = _normalize_images_in_messages(request.messages, dump_request_id)
     completion_kwargs = request.model_dump()
     completion_kwargs["messages"] = normalized_messages
     completion_kwargs.update(credentials)
