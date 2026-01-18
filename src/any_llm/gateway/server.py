@@ -23,6 +23,8 @@ from any_llm.gateway.routes.webtoon.review_webtoon import router as webtoon_revi
 from any_llm.gateway.routes.webtoon.sns_copy import router as webtoon_sns_copy_router
 from any_llm.gateway.routes.webtoon.publish_copy import router as webtoon_publish_copy_router
 from any_llm.gateway.routes.webtoon.panel_image import router as webtoon_panel_image_router
+from any_llm.gateway.routes.calendar.prompt import router as calendar_prompt_router
+from any_llm.gateway.routes.calendar.image import router as calendar_image_router
 
 
 def create_app(config: GatewayConfig) -> FastAPI:
@@ -83,6 +85,8 @@ def create_app(config: GatewayConfig) -> FastAPI:
     app.include_router(webtoon_character_sheet_generation_router)
     app.include_router(webtoon_character_sheet_analysis_router)
     app.include_router(webtoon_caricature_sheet_router)
+    app.include_router(calendar_prompt_router)
+    app.include_router(calendar_image_router)
 
     @app.get("/", include_in_schema=False)
     async def redirect_to_docs() -> RedirectResponse:
