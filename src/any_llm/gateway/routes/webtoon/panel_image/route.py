@@ -101,14 +101,16 @@ def _normalize_image(
     resolution: ResolutionType,
     aspect_ratio: AspectRatioType,
 ) -> tuple[bytes, str]:
+    """Normalize image to target resolution and convert to WebP (lossless for webtoon quality)."""
     try:
         width, height = _resolve_target_size(resolution, aspect_ratio)
         with Image.open(io.BytesIO(image_bytes)) as img:
             img = img.convert("RGBA")
             img = img.resize((width, height), Image.Resampling.LANCZOS)
             output = io.BytesIO()
-            img.save(output, format="PNG")
-            return output.getvalue(), "image/png"
+            # WebP lossless: 화질 100% 유지, PNG 대비 20-30% 용량 절감
+            img.save(output, format="WEBP", lossless=True)
+            return output.getvalue(), "image/webp"
     except Exception as exc:
         logger.warning("Failed to normalize panel image size: %s", exc)
         return image_bytes, "image/png"
@@ -326,11 +328,14 @@ def _parse_character_sheet_metadata(raw: Any) -> dict[str, Any] | None:
 
 
 def _parse_panel_metadata(raw: str | None) -> dict[str, Any] | None:
+    """Parse panel metadata with 4 key elements: characters, camera, environment, continuity."""
     if not raw:
         return None
     payload = _extract_json_from_text(raw)
     if not isinstance(payload, dict):
         return None
+
+    # Parse new 4-element structure
     characters = []
     for item in payload.get("characters") or []:
         if not isinstance(item, dict):
@@ -338,6 +343,11 @@ def _parse_panel_metadata(raw: str | None) -> dict[str, Any] | None:
         characters.append(
             {
                 "name": item.get("name"),
+                # New position/spatial elements
+                "position": item.get("position"),  # left|center|right
+                "facing": item.get("facing"),  # left|right|camera
+                "expression": item.get("expression"),
+                # Legacy elements for backward compatibility
                 "outfit": item.get("outfit"),
                 "accessories": _coerce_string_array(item.get("accessories")),
                 "hair": item.get("hair"),
@@ -346,9 +356,37 @@ def _parse_panel_metadata(raw: str | None) -> dict[str, Any] | None:
                 "notes": item.get("notes"),
             }
         )
+
+    # Parse camera info
+    camera_raw = payload.get("camera") or {}
+    camera = {
+        "shot_type": camera_raw.get("shot_type"),  # close-up|medium|wide
+        "angle": camera_raw.get("angle"),  # eye-level|low|high
+    } if isinstance(camera_raw, dict) else None
+
+    # Parse environment info
+    env_raw = payload.get("environment") or {}
+    environment = {
+        "location": env_raw.get("location"),
+        "time_of_day": env_raw.get("time_of_day"),  # morning|afternoon|evening|night
+        "weather": env_raw.get("weather"),  # sunny|cloudy|rainy|snowy
+        "lighting": env_raw.get("lighting"),
+    } if isinstance(env_raw, dict) else None
+
+    # Parse continuity info
+    cont_raw = payload.get("continuity") or {}
+    continuity = {
+        "key_objects": _coerce_string_array(cont_raw.get("key_objects")),
+        "spatial_notes": _coerce_string_array(cont_raw.get("spatial_notes")),
+    } if isinstance(cont_raw, dict) else None
+
     return {
         "summary": payload.get("summary"),
         "characters": characters or None,
+        "camera": camera,
+        "environment": environment,
+        "continuity": continuity,
+        # Legacy fields for backward compatibility
         "background": payload.get("background"),
         "lighting": payload.get("lighting"),
         "changes": _coerce_string_array(payload.get("changes")),
@@ -413,42 +451,119 @@ def _format_character_sheet_metadata(metadata: dict[str, Any]) -> str:
     return "; ".join([part for part in parts if part])
 
 
+def _extract_key_visual_elements(metadata: dict[str, Any]) -> dict[str, str]:
+    """Extract key visual elements that MUST remain consistent across panels."""
+    return {
+        "hair": metadata.get("hair") or "",
+        "face": metadata.get("face") or "",
+        "outfit": ", ".join(metadata.get("outfit") or []) if isinstance(metadata.get("outfit"), list) else (metadata.get("outfit") or ""),
+        "colors": ", ".join(metadata.get("colors") or []) if isinstance(metadata.get("colors"), list) else (metadata.get("colors") or ""),
+        "accessories": ", ".join(metadata.get("accessories") or []) if isinstance(metadata.get("accessories"), list) else (metadata.get("accessories") or ""),
+    }
+
+
+def _format_visual_identity_lock(name: str, elements: dict[str, str]) -> str:
+    """Format key visual elements as a strict identity lock for a character."""
+    lines: list[str] = []
+    if elements.get("hair"):
+        lines.append(f"  - HAIR (IMMUTABLE): {elements['hair']}")
+    if elements.get("face"):
+        lines.append(f"  - FACE (IMMUTABLE): {elements['face']}")
+    if elements.get("outfit"):
+        lines.append(f"  - OUTFIT (IMMUTABLE): {elements['outfit']}")
+    if elements.get("colors"):
+        lines.append(f"  - COLORS (IMMUTABLE): {elements['colors']}")
+    if elements.get("accessories"):
+        lines.append(f"  - ACCESSORIES (IMMUTABLE): {elements['accessories']}")
+    if not lines:
+        return ""
+    return f"[{name}]\n" + "\n".join(lines)
+
+
 def _format_panel_metadata(metadata: dict[str, Any]) -> str:
+    """Format panel metadata with 4 key elements for continuity in subsequent panels."""
     parts: list[str] = []
     if metadata.get("summary"):
         parts.append(f"summary: {metadata['summary']}")
+
+    # Format characters with position/spatial info (4-element structure)
     characters = metadata.get("characters") or []
     if characters:
         character_lines = []
         for character in characters:
             name = character.get("name") or ""
             detail_parts: list[str] = []
+            # New position/spatial elements (priority for continuity)
+            if character.get("position"):
+                detail_parts.append(f"position: {character['position']}")
+            if character.get("facing"):
+                detail_parts.append(f"facing: {character['facing']}")
+            if character.get("expression"):
+                detail_parts.append(f"expression: {character['expression']}")
+            # Legacy elements
             if character.get("outfit"):
-                detail_parts.append(f"outfit {character['outfit']}")
+                detail_parts.append(f"outfit: {character['outfit']}")
             if character.get("accessories"):
-                detail_parts.append(f"accessories {', '.join(character['accessories'])}")
+                detail_parts.append(f"accessories: {', '.join(character['accessories'])}")
             if character.get("hair"):
-                detail_parts.append(f"hair {character['hair']}")
+                detail_parts.append(f"hair: {character['hair']}")
             if character.get("props"):
-                detail_parts.append(f"props {', '.join(character['props'])}")
+                detail_parts.append(f"props: {', '.join(character['props'])}")
             if character.get("pose"):
-                detail_parts.append(f"pose {character['pose']}")
+                detail_parts.append(f"pose: {character['pose']}")
             if character.get("notes"):
-                detail_parts.append(f"notes {character['notes']}")
+                detail_parts.append(f"notes: {character['notes']}")
             if detail_parts:
                 character_lines.append(f"{name} ({', '.join(detail_parts)})")
             else:
                 character_lines.append(name)
         if character_lines:
             parts.append(f"characters: {' | '.join(character_lines)}")
+
+    # Format camera info (new 4-element structure)
+    camera = metadata.get("camera")
+    if camera and isinstance(camera, dict):
+        camera_parts = []
+        if camera.get("shot_type"):
+            camera_parts.append(f"shot: {camera['shot_type']}")
+        if camera.get("angle"):
+            camera_parts.append(f"angle: {camera['angle']}")
+        if camera_parts:
+            parts.append(f"camera: {', '.join(camera_parts)}")
+
+    # Format environment info (new 4-element structure)
+    environment = metadata.get("environment")
+    if environment and isinstance(environment, dict):
+        env_parts = []
+        if environment.get("location"):
+            env_parts.append(f"location: {environment['location']}")
+        if environment.get("time_of_day"):
+            env_parts.append(f"time: {environment['time_of_day']}")
+        if environment.get("weather"):
+            env_parts.append(f"weather: {environment['weather']}")
+        if environment.get("lighting"):
+            env_parts.append(f"lighting: {environment['lighting']}")
+        if env_parts:
+            parts.append(f"environment: {', '.join(env_parts)}")
+
+    # Format continuity info (new 4-element structure)
+    continuity = metadata.get("continuity")
+    if continuity and isinstance(continuity, dict):
+        if continuity.get("key_objects"):
+            parts.append(f"key_objects: {', '.join(continuity['key_objects'])}")
+        if continuity.get("spatial_notes"):
+            parts.append(f"spatial: {', '.join(continuity['spatial_notes'])}")
+
+    # Legacy fields for backward compatibility
     if metadata.get("background"):
         parts.append(f"background: {metadata['background']}")
-    if metadata.get("lighting"):
+    if metadata.get("lighting") and not (environment and environment.get("lighting")):
         parts.append(f"lighting: {metadata['lighting']}")
     if metadata.get("changes"):
         parts.append(f"changes: {', '.join(metadata['changes'])}")
     if metadata.get("notes"):
         parts.append(f"notes: {', '.join(metadata['notes'])}")
+
     return "; ".join([part for part in parts if part])
 
 
@@ -566,20 +681,28 @@ def _build_image_system_instruction(
         "Generate exactly ONE single continuous scene without any borders, dividers, or panel separations. "
         "3) ANATOMICAL ACCURACY: Each character must have exactly 2 arms, 2 hands (5 fingers each), 2 legs, and 1 head. "
         "Never generate extra limbs, duplicate body parts, mutated hands, or fused fingers. "
-        "Always preserve all attached, worn, or held items (clothing layers, shoes, hats, glasses, jewelry, "
-        "hair accessories, bags, belts, watches, patches, logos, patterns, handheld props, attached gadgets) exactly as shown "
-        "in the character sheet images and metadata; keep their colors, materials, shapes, sizes, and placement immutable unless "
-        "the scene explicitly states a change. Do not invent or swap outfits or accessories. If there is any conflict between the "
-        "Scene Description/Dialogue Cues and the character sheet, prioritize the character sheet ONLY for character appearance "
-        "and still follow Scene/Dialogue for props, device states, and actions. Render only one instance per named character and "
-        "never duplicate the speaker."
+        "4) CHARACTER VISUAL IDENTITY - ABSOLUTE REQUIREMENT: "
+        "The character sheet images provided are the ONLY source of truth for character appearance. "
+        "You MUST match EXACTLY: hair color, hairstyle, face shape, outfit, clothing colors, and accessories. "
+        "These visual elements are IMMUTABLE and must remain identical across all panels. "
+        "Do NOT modify, reinterpret, or 'improve' any visual aspect of the character. "
+        "Copy the exact appearance from the character sheet image - treat it as a strict visual reference. "
+        "If there is ANY conflict between the scene description and the character sheet image, "
+        "ALWAYS prioritize the character sheet image for appearance (hair, face, outfit, colors, accessories). "
+        "Render only one instance per named character and never duplicate the speaker. "
+        "5) METADATA OUTPUT - REQUIRED: After generating the image, you MUST also output a JSON block describing the generated scene. "
+        "This metadata will be used for continuity in subsequent panels. Output format: "
+        '```json\n{"characters":[{"name":"Name","position":"left|center|right","facing":"left|right|camera","expression":"expression"}],'
+        '"camera":{"shot_type":"close-up|medium|wide","angle":"eye-level|low|high"},'
+        '"environment":{"location":"specific location","time_of_day":"morning|afternoon|evening|night","weather":"sunny|cloudy|rainy|snowy","lighting":"description"},'
+        '"continuity":{"key_objects":["object: position"],"spatial_notes":["important spatial info"]}}\n```'
     )
     if character_generation_mode == "caricature":
         base += " Keep the output clearly stylized and avoid photorealistic rendering or likeness to real people."
     if has_references:
-        base += " If reference images are provided, they are primary for character appearance only and must not override Scene/Dialogue for props or actions."
+        base += " Reference images are PRIMARY for character appearance - match them exactly."
     if not has_references and has_character_images:
-        base += " If character sheet images are provided, they are primary for character appearance only and must not override Scene/Dialogue for props or actions."
+        base += " Character sheet images are PRIMARY for character appearance - match them exactly. Study the image carefully and replicate the exact visual details."
     if has_background_references:
         base += " Background reference images are environment-only; ignore any people within them and do not let them override character appearance."
     return base
@@ -798,15 +921,19 @@ def _generate_panel_metadata(
     character_sheet_metadata_lines: str,
     continuity_prompt: str,
 ) -> str:
+    """Generate panel metadata with 4 key elements for visual continuity."""
     assert genai is not None
     prompt = f"""Return JSON ONLY (no markdown). Values must be in Korean.
 
-Schema:
+Schema (4 Key Elements for Visual Continuity):
 {{
   "summary": "One-sentence panel summary",
   "characters": [
     {{
       "name": "Character name",
+      "position": "left|center|right (character's position in frame)",
+      "facing": "left|right|camera (direction character is facing)",
+      "expression": "Current facial expression",
       "outfit": "Outfit description",
       "accessories": ["Accessories"],
       "hair": "Hair style/color",
@@ -815,13 +942,29 @@ Schema:
       "notes": "Details that must be preserved"
     }}
   ],
-  "background": "Background/location",
-  "lighting": "Lighting/time of day",
+  "camera": {{
+    "shot_type": "close-up|medium|wide",
+    "angle": "eye-level|low|high"
+  }},
+  "environment": {{
+    "location": "Specific location description",
+    "time_of_day": "morning|afternoon|evening|night",
+    "weather": "sunny|cloudy|rainy|snowy",
+    "lighting": "Lighting description"
+  }},
+  "continuity": {{
+    "key_objects": ["object: position (important objects and their positions)"],
+    "spatial_notes": ["Important spatial relationships between elements"]
+  }},
+  "background": "Background/location (legacy)",
+  "lighting": "Lighting/time of day (legacy)",
   "changes": ["Elements changed from the previous panel"],
   "notes": ["Must-keep continuity elements"]
 }}
 
 Rules:
+- CRITICAL: Position and facing direction must be specified for EACH character.
+- This metadata will be used to maintain visual consistency in subsequent panels.
 - Only describe observable facts (no guesses).
 - Use empty string or empty array if unknown.
 
@@ -847,6 +990,9 @@ Characters: {", ".join(characters)}
                 {
                     "summary": text.strip(),
                     "characters": [],
+                    "camera": None,
+                    "environment": None,
+                    "continuity": None,
                     "background": "",
                     "lighting": "",
                     "changes": [],
@@ -1217,6 +1363,7 @@ async def create_panel_image_response(
         [f"- Same character as {name}" for name in payload.characters if name]
     )
     character_sheet_metadata_lines_list: list[str] = []
+    visual_identity_lock_lines: list[str] = []
     for entry in payload.characterSheetMetadata or []:
         name = entry.name.strip() if entry.name else ""
         if not name:
@@ -1228,9 +1375,17 @@ async def create_panel_image_response(
         if not formatted:
             continue
         character_sheet_metadata_lines_list.append(f"- {name}: {formatted}")
+        # Extract key visual elements for identity lock
+        if parsed_metadata:
+            key_elements = _extract_key_visual_elements(parsed_metadata)
+            identity_lock = _format_visual_identity_lock(name, key_elements)
+            if identity_lock:
+                visual_identity_lock_lines.append(identity_lock)
     character_sheet_metadata_lines = "\n".join(character_sheet_metadata_lines_list)
+    visual_identity_lock_text = "\n\n".join(visual_identity_lock_lines)
     previous_panel_entries = payload.previousPanels or []
     continuity_notes: list[str] = []
+    spatial_continuity_notes: list[str] = []  # For 4-element position/spatial info
     for previous in previous_panel_entries:
         scene_text = previous.get("scene") or ""
         dialogue_text = previous.get("dialogue") or ""
@@ -1240,6 +1395,32 @@ async def create_panel_image_response(
             parsed_metadata = _parse_panel_metadata(metadata_text)
             if parsed_metadata:
                 formatted_metadata = _format_panel_metadata(parsed_metadata) or metadata_text
+                # Extract 4-element spatial/position info for strict continuity
+                characters_meta = parsed_metadata.get("characters") or []
+                for char in characters_meta:
+                    char_name = char.get("name") or ""
+                    position = char.get("position") or ""
+                    facing = char.get("facing") or ""
+                    if char_name and (position or facing):
+                        spatial_continuity_notes.append(
+                            f"- {char_name}: position={position}, facing={facing}"
+                        )
+                camera_meta = parsed_metadata.get("camera")
+                if camera_meta:
+                    shot = camera_meta.get("shot_type") or ""
+                    angle = camera_meta.get("angle") or ""
+                    if shot or angle:
+                        spatial_continuity_notes.append(f"- Camera: shot={shot}, angle={angle}")
+                env_meta = parsed_metadata.get("environment")
+                if env_meta:
+                    location = env_meta.get("location") or ""
+                    if location:
+                        spatial_continuity_notes.append(f"- Environment: {location}")
+                cont_meta = parsed_metadata.get("continuity")
+                if cont_meta:
+                    key_objects = cont_meta.get("key_objects") or []
+                    if key_objects:
+                        spatial_continuity_notes.append(f"- Key objects: {', '.join(key_objects)}")
             else:
                 formatted_metadata = metadata_text
         previous_dialogue = f" Dialogue - {dialogue_text}." if dialogue_text else ""
@@ -1249,9 +1430,20 @@ async def create_panel_image_response(
         )
     continuity_prompt = ""
     if continuity_notes:
+        spatial_block = ""
+        if spatial_continuity_notes:
+            spatial_block = (
+                "\n\n## ⚠️ SPATIAL CONTINUITY (CRITICAL) ⚠️\n"
+                "Maintain these positions and spatial relationships from the previous panel:\n"
+                + "\n".join(spatial_continuity_notes)
+                + "\n- Characters should stay in the SAME relative positions unless the scene explicitly describes movement."
+                "\n- If a character was on the LEFT, keep them on the LEFT. If on the RIGHT, keep them on the RIGHT."
+                "\n- Camera angle and shot type should remain consistent unless a scene transition occurs."
+            )
         continuity_prompt = (
             "## Continuity Notes\n"
             + "\n".join(continuity_notes)
+            + spatial_block
             + "\nAlways reuse the same outfit, accessories, props, and limb placements described above unless a scene explicitly calls for a change. "
             "Keep the background environment, lighting, and time-of-day consistent unless the script explicitly changes the setting. "
             "When a wardrobe, prop, or location change occurs, explain the reason while keeping facial features, hair color, and proportions consistent."
@@ -1292,6 +1484,23 @@ async def create_panel_image_response(
         else ""
     )
 
+    # Visual Identity Lock - HIGHEST PRIORITY for character appearance consistency
+    visual_identity_lock_block = (
+        "## ⚠️ VISUAL IDENTITY LOCK (HIGHEST PRIORITY) ⚠️\n"
+        "The following visual elements are IMMUTABLE and MUST be copied exactly from the character sheet images.\n"
+        "DO NOT modify, reinterpret, or change these elements under any circumstances:\n\n"
+        f"{visual_identity_lock_text}\n\n"
+        "ENFORCEMENT RULES:\n"
+        "- Hair color and style: Copy EXACTLY from the character sheet image. No variations allowed.\n"
+        "- Face shape and features: Match the reference image precisely.\n"
+        "- Outfit and clothing: Replicate the exact design, colors, and patterns.\n"
+        "- Accessories: Include ALL accessories shown in the character sheet.\n"
+        "- If you cannot see a detail clearly in the character sheet, use the metadata description.\n"
+        "- Scene descriptions may change poses and actions, but NEVER change appearance elements listed above."
+        if visual_identity_lock_text
+        else ""
+    )
+
     character_anchoring_block = (
         "## Character Anchoring (Single Instance Rule)\n"
         + "\n".join([f"- Render [{name}] as a single, complete figure. Do not show {name} multiple times or from multiple angles." for name in payload.characters if name])
@@ -1311,10 +1520,12 @@ async def create_panel_image_response(
         else ""
     )
 
-    primary_references = [ref for ref in payload.references or [] if ref.purpose != "background"]
+    primary_references = [ref for ref in payload.references or [] if ref.purpose not in ("background", "previous_panel")]
     background_references = [ref for ref in payload.references or [] if ref.purpose == "background"]
+    previous_panel_references = [ref for ref in payload.references or [] if ref.purpose == "previous_panel"]
     has_primary_references = bool(primary_references)
     has_background_references = bool(background_references)
+    has_previous_panel_reference = bool(previous_panel_references)
     has_character_images = bool(payload.characterImages)
 
     caricature_style_override = (
@@ -1415,6 +1626,24 @@ async def create_panel_image_response(
         else ""
     )
 
+    # Previous Panel Reference - for layout and spatial consistency
+    previous_panel_reference_block = (
+        "## ⚠️ PREVIOUS PANEL REFERENCE (LAYOUT/COMPOSITION ONLY) ⚠️\n"
+        "A previous panel image is provided to maintain visual continuity.\n"
+        "USE THIS FOR:\n"
+        "- Character POSITIONS (left/right placement, relative distances)\n"
+        "- Camera ANGLE and PERSPECTIVE (maintain similar viewpoint)\n"
+        "- Background LAYOUT (furniture, objects, architecture placement)\n"
+        "- Overall COMPOSITION and FRAMING\n\n"
+        "DO NOT USE THIS FOR:\n"
+        "- Character APPEARANCE (hair, face, outfit) - use CHARACTER SHEET instead\n"
+        "- Exact poses - follow the new scene description\n\n"
+        "RULE: If characters were on the left/right in the previous panel, keep them in similar positions "
+        "unless the scene explicitly describes movement or repositioning."
+        if has_previous_panel_reference
+        else ""
+    )
+
     system_instruction = _build_image_system_instruction(
         character_generation_mode=payload.characterGenerationMode,
         has_references=has_primary_references,
@@ -1449,16 +1678,8 @@ async def create_panel_image_response(
             f"# Role\n{role}\n\n"
             "# Instruction\n"
             "Reference the provided **character sheet images** absolutely and depict a scene that matches the **scene description**. "
-            "The characters' appearance, clothing, accessories, hairstyles, recurring props, and carried items should stay consistent "
-            "with their sheets across every panel whenever the narrative calls for no wardrobe change. If a scene intentionally swaps outfits "
-            "or props for a specific reason, describe that change clearly but keep facial features, hair color, and proportions unchanged so "
-            "continuity stays deliberate.\n"
-            + (
-                "If **reference images** are provided, treat them as the primary visual source and preserve identity, outfit, accessories, props, and background composition unless the scene explicitly changes them.\n"
-                if has_primary_references
-                else ""
-            )
-            + (f"\n{priority_rule}\n" if priority_rule else "\n")
+            "The character sheet images are your PRIMARY VISUAL REFERENCE - copy the appearance EXACTLY.\n"
+            + (f"\n{visual_identity_lock_block}\n\n" if visual_identity_lock_block else "")
             + "---\n\n"
             "## Key Style Guide\n"
             f"{CARICATURE_PANEL_STYLE_GUIDE if is_caricature else style_guide}\n\n"
@@ -1467,7 +1688,6 @@ async def create_panel_image_response(
             + (f"\n{era_guardrails_block}\n" if era_guardrails_block else "")
             + era_correction_block
             + background_correction_block
-            + ("" if not scene_authority_block else f"\n{scene_authority_block}\n\n")
             + "## Scene Information\n"
             f"Scene Description: {panel_description}\n"
             f"{scene_elements_block}\n"
@@ -1482,20 +1702,12 @@ async def create_panel_image_response(
             + (f"\n{character_sheet_metadata_block}\n" if character_sheet_metadata_block else "")
             + (f"\n{reference_metadata_block}\n" if reference_metadata_block else "")
             + (f"\n{background_reference_block}\n" if background_reference_block else "")
+            + (f"\n{previous_panel_reference_block}\n" if previous_panel_reference_block else "")
             + (f"\n{continuity_prompt}\n" if continuity_prompt else "")
-            + f"\n{attachment_continuity_block}\n"
             + f"\n{anatomical_accuracy_block}\n"
-            + f"\n{pose_simplification_block}\n"
             + (f"\n{character_anchoring_block}\n" if character_anchoring_block else "")
             + (f"\n{revision_focus}\n" if revision_focus else "")
-            + "\n## Character Consistency\n"
-            f"{consistency_prompt}\n"
-            + (f"\n## Caricature Guardrails\n{caricature_guardrails}\n" if caricature_guardrails else "")
-            + "\n## Character Count Constraints\n"
-            "- For each named character in this panel, render exactly one instance.\n"
-            "- Do not duplicate, mirror, or clone the speaker or any named character.\n"
-            "- If background people are needed, keep them anonymous and visually distinct from named characters.\n\n"
-            "## Output Format\n"
+            + "\n## Output Format\n"
             f"{output_format}\n"
             "Additional Rule: Do not include speech balloons."
         )
@@ -1527,6 +1739,7 @@ async def create_panel_image_response(
         parts.extend(_build_character_image_parts(payload.characterImages))
         parts.extend(_build_reference_parts(primary_references))
         parts.extend(_build_reference_parts(background_references))
+        parts.extend(_build_reference_parts(previous_panel_references))
         contents: Any = [genai.types.Content(role="user", parts=parts)]
 
         await report_progress("generate", f"이미지 생성 중{attempt_label}")
@@ -1642,14 +1855,21 @@ async def create_panel_image_response(
 
     await report_progress("complete", "완료")
 
+    # Prefer image model's actual metadata (final_text) over pre-generated metadata (metadata_summary)
+    # because final_text reflects what was actually generated (positions, camera angles, etc.)
     parsed = parse_json(final_text)
-    metadata_text = metadata_summary.strip() if metadata_summary else (final_text.strip() if final_text else "")
-    if not metadata_text and isinstance(parsed, dict):
-        scene_value = parsed.get("scene")
-        if isinstance(scene_value, str) and scene_value.strip():
-            metadata_text = scene_value.strip()
-        else:
-            metadata_text = json.dumps(parsed, ensure_ascii=False)
+    if isinstance(parsed, dict) and parsed.get("characters"):
+        # Image model returned valid 4-element metadata - use it
+        metadata_text = json.dumps(parsed, ensure_ascii=False)
+        logger.info("Using image model's metadata with %d characters", len(parsed.get("characters", [])))
+    elif final_text.strip():
+        # Image model returned some text but not valid JSON - try to use it
+        metadata_text = final_text.strip()
+    elif metadata_summary.strip():
+        # Fall back to pre-generated metadata
+        metadata_text = metadata_summary.strip()
+    else:
+        metadata_text = ""
 
     inline_data = base64.b64encode(normalized_bytes).decode("utf-8")
     result = finalize_response(
@@ -1767,6 +1987,51 @@ async def generate_panel_image(
         payload.era,
         payload.season,
     )
+
+    # Log additional metadata (excluding image data)
+    logger.info(
+        "webtoon.generate-panel-image metadata characters=%s characterDescriptions=%s characterImagesCount=%s referencesCount=%s revisionNote=%s",
+        payload.characters,
+        payload.characterDescriptions,
+        len(payload.characterImages) if payload.characterImages else 0,
+        len(payload.references) if payload.references else 0,
+        payload.revisionNote,
+    )
+
+    if payload.characterSheetMetadata:
+        sheet_metadata_summary = [
+            {"name": entry.name, "hasMetadata": bool(entry.metadata)}
+            for entry in payload.characterSheetMetadata
+        ]
+        logger.info(
+            "webtoon.generate-panel-image characterSheetMetadata=%s",
+            sheet_metadata_summary,
+        )
+
+    if payload.previousPanels:
+        previous_panels_summary = [
+            {
+                "panel": p.get("panel"),
+                "hasScene": bool(p.get("scene")),
+                "hasDialogue": bool(p.get("dialogue")),
+                "hasMetadata": bool(p.get("metadata")),
+            }
+            for p in payload.previousPanels
+        ]
+        logger.info(
+            "webtoon.generate-panel-image previousPanels=%s",
+            previous_panels_summary,
+        )
+
+    if payload.references:
+        references_summary = [
+            {"purpose": ref.purpose, "hasMimeType": bool(ref.mimeType)}
+            for ref in payload.references
+        ]
+        logger.info(
+            "webtoon.generate-panel-image references=%s",
+            references_summary,
+        )
 
     # Check for SSE streaming request
     accept_header = request.headers.get("accept", "")

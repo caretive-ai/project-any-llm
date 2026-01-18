@@ -92,3 +92,70 @@ def generate_text_content(
         contents=contents,
         config=content_config,
     )
+
+
+def build_multimodal_contents(prompt: str, images: list[dict[str, str]]) -> list[Any]:
+    """Build contents list for multimodal prompt with images.
+
+    Args:
+        prompt: Text prompt
+        images: List of dicts with 'data' (base64) and 'mime_type' keys
+    """
+    assert genai is not None
+    import base64
+
+    parts: list[Any] = []
+
+    # Add images first
+    for img in images:
+        if img.get("data") and img.get("mime_type"):
+            try:
+                image_bytes = base64.b64decode(img["data"])
+                parts.append(
+                    genai.types.Part.from_bytes(
+                        data=image_bytes,
+                        mime_type=img["mime_type"],
+                    )
+                )
+            except Exception as e:
+                logger.warning("Failed to decode image: %s", e)
+                continue
+
+    # Add text prompt
+    parts.append(genai.types.Part.from_text(text=prompt))
+
+    return [genai.types.Content(role="user", parts=parts)]
+
+
+def generate_multimodal_content(
+    client: Any,
+    model: str,
+    system_prompt: str | None,
+    user_prompt: str,
+    images: list[dict[str, str]],
+    temperature: float | None = None,
+) -> Any:
+    """Generate content with images using genai client.
+
+    Args:
+        client: genai Client instance
+        model: Model name
+        system_prompt: System instruction
+        user_prompt: User prompt text
+        images: List of dicts with 'data' (base64) and 'mime_type' keys
+        temperature: Generation temperature
+    """
+    assert genai is not None
+    content_config = build_text_content_config(system_prompt, temperature)
+    contents = build_multimodal_contents(user_prompt, images)
+    logger.info(
+        "generate_multimodal_content: model=%s, temperature=%s, imageCount=%d",
+        model,
+        temperature,
+        len(images),
+    )
+    return client.models.generate_content(
+        model=model,
+        contents=contents,
+        config=content_config,
+    )

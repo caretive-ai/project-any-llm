@@ -8,7 +8,7 @@ from pydantic import BaseModel
 class ReferenceEntry(BaseModel):
     base64: str
     mimeType: str | None = None
-    purpose: Literal["background", "character", "style"] | None = None
+    purpose: Literal["background", "character", "style", "previous_panel"] | None = None
 
 
 class CharacterSheetMetadataEntry(BaseModel):

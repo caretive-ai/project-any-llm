@@ -87,6 +87,14 @@ def build_prompt(
     caricature_line = (
         "- In caricature mode, keep dialogue short and colloquial.\n" if character_mode == "caricature" else ""
     )
+    multi_speaker = len(speakers) >= 2
+    conversation_rules = (
+        "- IMPORTANT: Create a back-and-forth conversation where speakers alternate turns (티키타카 style).\n"
+        "- Each speaker must respond to or react to what the other said.\n"
+        "- Speakers should interact naturally, not deliver separate monologues."
+        if multi_speaker
+        else "- The single speaker may have 2-3 lines expressing their thoughts or narration."
+    )
     lines = [
         "You are a writer creating webtoon dialogue.",
         "",
@@ -97,7 +105,7 @@ def build_prompt(
         "- Produce 2–4 short dialogue lines.",
         "- Each line should be one sentence.",
         "- Use only the provided speaker list.",
-        "- If there are 2+ speakers, each must speak at least once.",
+        conversation_rules,
         "- No action tags like '(sigh)'.",
         "- Avoid overly explanatory lines; reveal emotion and relationships.",
         caricature_line.strip(),
