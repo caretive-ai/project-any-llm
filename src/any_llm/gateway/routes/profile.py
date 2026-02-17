@@ -146,12 +146,13 @@ class BalanceResponse(BaseModel):
 async def get_balance(
     auth_result: Annotated[tuple[APIKey | None, bool, str | None, SessionToken | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
+    user: str | None = Query(None, description="마스터 키 사용 시 조회할 user_id"),
 ) -> BalanceResponse:
     """현재 사용자의 크레딧 잔액을 반환."""
     target_user_id = resolve_target_user(
         auth_result,
-        None,
-        missing_master_detail="When using master key, user resolution failed",
+        user,
+        missing_master_detail="When using master key, 'user' query parameter is required",
     )
 
     # row = (

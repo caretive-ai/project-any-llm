@@ -30,6 +30,11 @@ def init_db(database_url: str, auto_migrate: bool = True) -> None:
 
         command.upgrade(alembic_cfg, "head")
 
+        # Create any tables not covered by Alembic migrations (e.g. caret_models)
+        from any_llm.gateway.db.models import Base
+
+        Base.metadata.create_all(bind=_engine, checkfirst=True)
+
 
 def get_db() -> Generator[Session]:
     """Get database session for dependency injection."""

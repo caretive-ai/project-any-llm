@@ -27,6 +27,49 @@ from any_llm.gateway.routes.calendar.prompt import router as calendar_prompt_rou
 from any_llm.gateway.routes.calendar.image import router as calendar_image_router
 
 
+def _seed_billing_plans(db: "Session") -> None:
+    """Ensure billing plans exist (matching careti.ai plans)."""
+    from any_llm.gateway.db.caret_models import BillingPlan
+
+    plans = [
+        {
+            "name": "FREE",
+            "monthly_credits": 10.0,
+            "monthly_bonus_credits": 20.0,
+            "add_amount_usd": 0.0,
+            "add_bonus_percent": 0.0,
+            "price_usd": 0.0,
+            "currency": "USD",
+            "credits_per_usd": 10.0,
+            "renew_interval_days": 30,
+        },
+        {
+            "name": "BASIC",
+            "monthly_credits": 100.0,
+            "monthly_bonus_credits": 0.0,
+            "add_amount_usd": 10.0,
+            "add_bonus_percent": 0.0,
+            "price_usd": 10.0,
+            "currency": "USD",
+            "credits_per_usd": 10.0,
+            "renew_interval_days": 30,
+        },
+    ]
+
+    for plan_data in plans:
+        existing = db.query(BillingPlan).filter(
+            BillingPlan.name == plan_data["name"],
+        ).first()
+        if existing:
+            for key, value in plan_data.items():
+                if key != "name":
+                    setattr(existing, key, value)
+            existing.active = True
+        else:
+            db.add(BillingPlan(**plan_data, active=True))
+    db.commit()
+
+
 def create_app(config: GatewayConfig) -> FastAPI:
     """Create and configure FastAPI application.
 
@@ -43,6 +86,7 @@ def create_app(config: GatewayConfig) -> FastAPI:
     db = next(get_db())
     try:
         initialize_pricing_from_config(config, db)
+        _seed_billing_plans(db)
     finally:
         db.close()
 

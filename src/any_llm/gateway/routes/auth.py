@@ -225,7 +225,12 @@ def jwt_exp(token: str) -> int:
 
 
 def _ensure_free_plan_and_balance(db: Session, user_id: str, now: datetime) -> None:
-    """Seed free subscription plan/subscription and credit pools for new users."""
+    """Seed FREE plan subscription and signup bonus for new users.
+
+    Matching careti.ai FREE plan:
+    - Signup: 20 credits instantly (BONUS pool, no expiry)
+    - Monthly: 10 credits auto-top-up if balance < 10 (handled by renewal cron)
+    """
     plan = (
         db.query(BillingPlan)
         .filter(BillingPlan.name == "FREE", BillingPlan.active.is_(True))
@@ -234,45 +239,23 @@ def _ensure_free_plan_and_balance(db: Session, user_id: str, now: datetime) -> N
     if not plan:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="FREE plan not configured")
 
-    expires_at = now + timedelta(days=int(plan.renew_interval_days))
+    renew_at = now + timedelta(days=int(plan.renew_interval_days))
     subscription = BillingSubscription(
         user_id=user_id,
         plan_id=plan.id,
         status="ACTIVE",
         start_at=now,
-        renew_at=expires_at,
+        renew_at=renew_at,
     )
     db.add(subscription)
 
-    balance = CreditBalance(
-        user_id=user_id,
-        pool_type="SUBSCRIPTION",
-        source_id=plan.id,
-        amount=float(plan.monthly_credits),
-        expires_at=expires_at,
-        priority=2,
-    )
-    db.add(balance)
-
-    topup = CreditTopup(
-        user_id=user_id,
-        pool_type="SUBSCRIPTION",
-        amount=float(plan.monthly_credits),
-        amount_usd=0.0,
-        credits_per_usd=float(plan.credits_per_usd),
-        expires_at=expires_at,
-        source="SUBSCRIPTION_RENEWAL",
-        metadata_={"seeded": True},
-    )
-    db.add(topup)
-
-
+    # Signup bonus: 20 credits (monthly_bonus_credits), no expiry
     bonus_balance = CreditBalance(
         user_id=user_id,
         pool_type="BONUS",
         source_id=plan.id,
         amount=float(plan.monthly_bonus_credits),
-        expires_at=expires_at,
+        expires_at=None,
         priority=1,
     )
     db.add(bonus_balance)
@@ -283,7 +266,7 @@ def _ensure_free_plan_and_balance(db: Session, user_id: str, now: datetime) -> N
         amount=float(plan.monthly_bonus_credits),
         amount_usd=0.0,
         credits_per_usd=float(plan.credits_per_usd),
-        expires_at=expires_at,
+        expires_at=None,
         source="FIRST_JOIN",
         metadata_={"seeded": True},
     )
